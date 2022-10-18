@@ -21,6 +21,7 @@ class ChargingCommand extends Command
     private const ACTION_STATUS = 'status';
     private const ACTION_STOP = 'stop';
     private const ACTION_START = 'start';
+    private const ACTION_WAKE = 'wake';
 
     private HttpClientInterface $client;
     private string $vehicleId;
@@ -73,6 +74,10 @@ class ChargingCommand extends Command
                     $io->note('Attempting to stop vehicle charging');
                     $this->stop();
                     $io->success('Vehicle charging stopped successfully');
+                    break;
+                case self::ACTION_WAKE:
+                    $io->note('Attempting to wake vehicle');
+                    $this->wake();
                     break;
                 default:
                     $io->error(sprintf('Unknown command: $%s', $action));
@@ -137,6 +142,20 @@ class ChargingCommand extends Command
 
         if ($responseArray['response']['result'] !== true) {
             throw new \Exception(sprintf('Charging stop api failed to stop charging: %s', $responseArray['response']['reason']));
+        }
+    }
+
+    private function wake(): void
+    {
+        $response = $this->client->request('POST', 'api/1/vehicles/'.$this->vehicleId.'/wake_up');
+
+        if ($response->getStatusCode() !== Response::HTTP_OK) {
+            throw new \Exception(sprintf('Wake api returned status code %s', $response->getStatusCode()));
+        }
+
+        $responseArray = $response->toArray();
+        if (!array_key_exists('response', $responseArray)) {
+            throw new \Exception('Wake api returned wrong body format');
         }
     }
 }
