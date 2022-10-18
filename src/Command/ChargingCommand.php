@@ -9,6 +9,7 @@ use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 #[AsCommand(
@@ -21,9 +22,8 @@ class ChargingCommand extends Command
     private const ACTION_STOP = 'stop';
     private const ACTION_START = 'start';
 
-    private string $apiUrl;
     private HttpClientInterface $client;
-    private string $apiToken = '';
+    private string $vehicleId;
 
     protected function configure(): void
     {
@@ -32,10 +32,22 @@ class ChargingCommand extends Command
         ;
     }
 
-    public function __construct(string $apiUrl, HttpClientInterface $client)
+    public function __construct(HttpClientInterface $client, string $apiUrl, string $vehicleId)
     {
-        $this->apiUrl = $apiUrl;
-        $this->client = $client;
+        $cache = new FilesystemAdapter();
+        $apiToken = $cache->getItem('api.token');
+        if (!$apiToken->isHit()) {
+            throw new \Exception('Api token not found');
+        }
+
+        $this->client = $client->withOptions([
+            'base_uri' => $apiUrl,
+            'headers' => [
+                'Authorization' => 'Bearer '.$apiToken->get(),
+                'Accept' => 'application/json'
+            ]
+        ]);
+        $this->vehicleId = $vehicleId;
 
         parent::__construct();
     }
@@ -45,35 +57,30 @@ class ChargingCommand extends Command
         $io = new SymfonyStyle($input, $output);
         $action = $input->getArgument('action');
 
-        $cache = new FilesystemAdapter();
-        $apiToken = $cache->getItem('api.token');
-
-        if (!$apiToken->isHit()) {
-            $io->error('Api token not found');
+        try {
+            switch ($action) {
+                case self::ACTION_STATUS:
+                    $io->note('Checking vehicle current charging status');
+                    $currentStatus = $this->status();
+                    $io->success(sprintf('vehicle current charging status: %s', $currentStatus));
+                    break;
+                case self::ACTION_START:
+                    $io->note('Attempting to start vehicle charging');
+                    $this->start();
+                    $io->success('Vehicle charging started successfully');
+                    break;
+                case self::ACTION_STOP:
+                    $io->note('Attempting to stop vehicle charging');
+                    $this->stop();
+                    $io->success('Vehicle charging stopped successfully');
+                    break;
+                default:
+                    $io->error(sprintf('Unknown command: $%s', $action));
+                    return Command::INVALID;
+            }
+        } catch (\Exception $exception) {
+            $io->error($exception->getMessage());
             return Command::FAILURE;
-        }
-
-        $this->apiToken = $apiToken->get();
-
-        switch ($action) {
-            case self::ACTION_STATUS:
-                $io->note('Checking vehicle current charging status');
-                $currentStatus = $this->status();
-                $io->success(sprintf('vehicle current charging status: %s', $currentStatus));
-                break;
-            case self::ACTION_START:
-                $io->note('Attempting to start vehicle charging');
-                $this->start();
-                $io->success('Vehicle charging started successfully');
-                break;
-            case self::ACTION_STOP:
-                $io->note('Attempting to stop vehicle charging');
-                $this->stop();
-                $io->success('Vehicle charging stopped successfully');
-                break;
-            default:
-                $io->error(sprintf('Unknown command: $%s', $action));
-                return Command::INVALID;
         }
 
         return Command::SUCCESS;
@@ -81,16 +88,55 @@ class ChargingCommand extends Command
 
     private function status(): string
     {
-        return '';
+        $response = $this->client->request('GET', 'api/1/vehicles/'.$this->vehicleId.'/data_request/charge_state');
+
+        if ($response->getStatusCode() !== Response::HTTP_OK) {
+            throw new \Exception(sprintf('Charging status api returned status code %s', $response->getStatusCode()));
+        }
+
+        $responseArray = $response->toArray();
+        if (!array_key_exists('response', $responseArray)
+            || !array_key_exists('battery_level', $responseArray['response'])
+        ) {
+            throw new \Exception('Charging status api returned wrong body format');
+        }
+
+        return $responseArray['response']['battery_level'];
     }
 
     private function start(): void
     {
+        $response = $this->client->request('POST', 'api/1/vehicles/'.$this->vehicleId.'/command/charge_start');
 
+        if ($response->getStatusCode() !== Response::HTTP_OK) {
+            throw new \Exception(sprintf('Charging start api returned status code %s', $response->getStatusCode()));
+        }
+
+        $responseArray = $response->toArray();
+        if (!array_key_exists('response', $responseArray) || !array_key_exists('result', $responseArray['response'])) {
+            throw new \Exception('Charging start api returned wrong body format');
+        }
+
+        if ($responseArray['response']['result'] !== true) {
+            throw new \Exception(sprintf('Charging start api failed to start charging: %s', $responseArray['response']['reason']));
+        }
     }
 
     private function stop(): void
     {
+        $response = $this->client->request('POST', 'api/1/vehicles/'.$this->vehicleId.'/command/charge_stop');
 
+        if ($response->getStatusCode() !== Response::HTTP_OK) {
+            throw new \Exception(sprintf('Charging stop api returned status code %s', $response->getStatusCode()));
+        }
+
+        $responseArray = $response->toArray();
+        if (!array_key_exists('response', $responseArray) || !array_key_exists('result', $responseArray['response'])) {
+            throw new \Exception('Charging stop api returned wrong body format');
+        }
+
+        if ($responseArray['response']['result'] !== true) {
+            throw new \Exception(sprintf('Charging stop api failed to stop charging: %s', $responseArray['response']['reason']));
+        }
     }
 }
